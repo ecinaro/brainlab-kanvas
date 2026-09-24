@@ -82,8 +82,9 @@ export function outputOf(node: AppNode, jobsForNode: Job[]): NodeOutput | null {
     case 'model': {
       const job = selectedJob(node, jobsForNode);
       const file = job?.files[0];
-      if (!job || !file) return null;
-      return { type: job.outputType ?? 'image', ref: `local:${file}`, url: job.mediaUrls[0] };
+      if (job && file) return { type: job.outputType ?? 'image', ref: `local:${file}`, url: job.mediaUrls[0] };
+      const pinned = (node.data as unknown as ModelData).pinned;
+      return pinned?.ref ? { type: pinned.type, ref: pinned.ref, url: pinned.url } : null;
     }
     default:
       return null;

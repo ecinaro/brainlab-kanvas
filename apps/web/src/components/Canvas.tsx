@@ -9,6 +9,7 @@ import {
   useReactFlow,
 } from '@xyflow/react';
 import { useCallback, useEffect } from 'react';
+import { parseClip } from '../lib/clipboard';
 import { checkConnection } from '../lib/connections';
 import { firstImageFile, uploadIntoNode } from '../lib/upload';
 import type { AppEdge, AppNode } from '../lib/types';
@@ -48,15 +49,52 @@ export function Canvas() {
   useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
       if (isTyping()) return;
+      // Önce kanvastan kopyalanmış node'lar, yoksa görsel.
+      const clip = parseClip(e.clipboardData?.getData('text/plain'));
+      if (clip) {
+        e.preventDefault();
+        useCanvas.getState().paste(clip);
+        return;
+      }
       const file = firstImageFile(e.clipboardData?.items);
-      if (!file) return;
+      if (!file) {
+        // Sistem panosuna yazılamadıysa (izin yok vb.) uygulama içi kopya yapıştırılır;
+        // panoda başka bir metin varsa eski node'lar yapıştırılmaz.
+        if (!e.clipboardData?.getData('text/plain')) useCanvas.getState().paste();
+        return;
+      }
       e.preventDefault();
       const center = flow.screenToFlowPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
       uploadIntoNode(addNode('upload', center), file);
     };
     // Ctrl+Enter: seçili model node'larını çalıştır
     const onKey = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      const mod = e.ctrlKey || e.metaKey;
+      const s = useCanvas.getState();
+      // Metin kutularında tarayıcının kendi geri al/kopyala davranışı korunur.
+      if (mod && !isTyping()) {
+        const k = e.key.toLowerCase();
+        if (k === 'z' && !e.shiftKey) {
+          e.preventDefault();
+          s.undo();
+          return;
+        }
+        if ((k === 'z' && e.shiftKey) || k === 'y') {
+          e.preventDefault();
+          s.redo();
+          return;
+        }
+        if (k === 'c') {
+          if (s.copySelection()) e.preventDefault();
+          return;
+        }
+        if (k === 'd') {
+          e.preventDefault();
+          s.duplicateSelection();
+          return;
+        }
+      }
+      if (mod && e.key === 'Enter') {
         e.preventDefault();
         if (e.shiftKey) {
           useCanvas.getState().runAll();

@@ -19,7 +19,9 @@ import {
 } from '@xyflow/react';
 import { create } from 'zustand';
 import { api, ApiError } from './api';
+import { cloneWithNewIds, type ClipPayload, packNodes } from './lib/clipboard';
 import { checkConnection } from './lib/connections';
+import { History, snapshot } from './lib/history';
 import { directModelDeps, findCachedJob, planRun } from './lib/pipeline';
 import { outputOf } from './lib/ports';
 import {
@@ -32,10 +34,8 @@ import {
   RUNNING_STATES,
 } from './lib/types';
 
-export const PROJECT_ID = 'default';
-
 let seq = 0;
-const newId = (kind: string) => `${kind}-${Date.now().toString(36)}-${(seq++).toString(36)}`;
+export const newId = (kind: string) => `${kind}-${Date.now().toString(36)}-${(seq++).toString(36)}`;
 
 export function defaultData<K extends NodeKind>(kind: K): DataByKind[K] {
   const d: DataByKind = {
@@ -64,9 +64,22 @@ interface MissingInput {
 /** pendingUpstream: hata değil, zincir çalışınca giderilecek bir eksik */
 export type NodeIssue = Issue & { pendingUpstream?: boolean };
 
+interface ProjectDoc {
+  id: string;
+  name?: string;
+  nodes?: AppNode[];
+  edges?: AppEdge[];
+  viewport?: Viewport;
+}
+
 type StepResult = 'ok' | 'failed' | 'blocked';
 /** Şu an zincirde çalışan adımlar (node id → sonuç) */
 const inflight = new Map<string, Promise<StepResult>>();
+const history = new History();
+/** Uygulama içi pano (sistem panosuna yazılamazsa da çalışır) */
+let memoryClip: ClipPayload | null = null;
+let pasteCount = 0;
+let dragging = false;
 
 /** Görev bitene (success/fail/timeout) kadar bekler. */
 function waitForJob(jobId: string): Promise<Job['state']> {
@@ -99,7 +112,20 @@ function nodeTitle(id: string): string {
   return def?.name ?? id;
 }
 
+/** Geri alınabilir değişiklikten önce çağrılır. */
+function checkpoint(key?: string) {
+  const { nodes, edges, loaded } = useCanvas.getState();
+  if (!loaded) return;
+  history.checkpoint(snapshot(nodes, edges), key);
+  useCanvas.setState((s) => ({ historyVersion: s.historyVersion + 1 }));
+}
+
+/** Kullanıcının değiştirdiği (geri alınabilir) veri alanları; çalıştırma durumu gibi sistem alanları hariç. */
+const USER_DATA_KEYS = new Set(['text', 'params', 'modelId', 'selectedJobId', 'ref']);
+
 interface CanvasState {
+  projectId: string | null;
+  projectName: string;
   nodes: AppNode[];
   edges: AppEdge[];
   viewport?: Viewport;
@@ -109,6 +135,8 @@ interface CanvasState {
   jobs: Record<string, Job>;
   /** Bir görev bittiğinde artar; üst bar bakiyeyi yeniler */
   creditsVersion: number;
+  /** Geri al/yinele düğmelerinin güncellenmesi için */
+  historyVersion: number;
   toast: string | null;
 
   onNodesChange: (c: NodeChange<AppNode>[]) => void;
@@ -120,9 +148,19 @@ interface CanvasState {
   setViewport: (v: Viewport) => void;
   showToast: (msg: string) => void;
 
+  undo: () => void;
+  redo: () => void;
+  canUndo: () => boolean;
+  canRedo: () => boolean;
+  copySelection: () => ClipPayload | null;
+  paste: (clip?: ClipPayload | null) => void;
+  duplicateSelection: () => void;
+  exportProject: () => { name: string; data: string };
+
   setJobs: (jobs: Job[]) => void;
   upsertJob: (job: Job) => void;
   jobsFor: (nodeId: string) => Job[];
+  refreshJobs: () => Promise<void>;
 
   gatherInputs: (nodeId: string) => { inputs: PortValues; missing: MissingInput[] };
   issuesFor: (nodeId: string) => NodeIssue[];
@@ -134,10 +172,13 @@ interface CanvasState {
   runNode: (nodeId: string) => Promise<void>;
   runAll: () => Promise<void>;
 
-  load: () => Promise<void>;
+  load: (projectId: string) => Promise<void>;
+  rename: (name: string) => Promise<void>;
 }
 
 export const useCanvas = create<CanvasState>((set, get) => ({
+  projectId: null,
+  projectName: '',
   nodes: [],
   edges: [],
   loaded: false,
@@ -146,10 +187,28 @@ export const useCanvas = create<CanvasState>((set, get) => ({
   jobs: {},
   runStatus: {},
   creditsVersion: 0,
+  historyVersion: 0,
   toast: null,
 
-  onNodesChange: (changes) => set({ nodes: applyNodeChanges(changes, get().nodes) }),
-  onEdgesChange: (changes) => set({ edges: applyEdgeChanges(changes, get().edges) }),
+  onNodesChange: (changes) => {
+    if (changes.some((c) => c.type === 'remove')) checkpoint();
+    // Sürükleme başlarken tek bir geçmiş adımı; bitene kadar ara konumlar kaydedilmez.
+    const drag = changes.find((c) => c.type === 'position');
+    if (drag && drag.type === 'position') {
+      if (drag.dragging && !dragging) {
+        dragging = true;
+        checkpoint();
+      } else if (!drag.dragging) {
+        dragging = false;
+      }
+    }
+    set({ nodes: applyNodeChanges(changes, get().nodes) });
+  },
+
+  onEdgesChange: (changes) => {
+    if (changes.some((c) => c.type === 'remove')) checkpoint();
+    set({ edges: applyEdgeChanges(changes, get().edges) });
+  },
 
   onConnect: (c) => {
     const { nodes, edges } = get();
@@ -158,6 +217,7 @@ export const useCanvas = create<CanvasState>((set, get) => ({
       get().showToast(check.reason);
       return;
     }
+    checkpoint();
     const kept = check.replaceEdgeId ? edges.filter((e) => e.id !== check.replaceEdgeId) : edges;
     const edge: AppEdge = {
       ...c,
@@ -169,6 +229,7 @@ export const useCanvas = create<CanvasState>((set, get) => ({
   },
 
   addNode: (kind, position, data) => {
+    checkpoint();
     const id = newId(kind);
     const node: AppNode = {
       id,
@@ -181,19 +242,34 @@ export const useCanvas = create<CanvasState>((set, get) => ({
     return id;
   },
 
-  updateData: (id, patch) =>
-    set({ nodes: get().nodes.map((n) => (n.id === id ? { ...n, data: { ...n.data, ...patch } } : n)) }),
+  updateData: (id, patch) => {
+    const userKeys = Object.keys(patch).filter((k) => USER_DATA_KEYS.has(k));
+    if (userKeys.length) checkpoint(`data:${id}:${userKeys.sort().join(',')}`);
+    set({ nodes: get().nodes.map((n) => (n.id === id ? { ...n, data: { ...n.data, ...patch } } : n)) });
+  },
 
   changeModel: (id, modelId) => {
     const next = getModel(modelId);
     const node = get().nodes.find((n) => n.id === id);
     if (!next || !node) return;
+    checkpoint();
     const prev = node.data as unknown as ModelData;
-    get().updateData(id, {
-      modelId,
-      params: withDefaults(next, prev.params),
-      selectedJobId: undefined,
-      runError: undefined,
+    set({
+      nodes: get().nodes.map((n) =>
+        n.id === id
+          ? {
+              ...n,
+              data: {
+                ...n.data,
+                modelId,
+                params: withDefaults(next, prev.params),
+                selectedJobId: undefined,
+                runError: undefined,
+                pinned: undefined,
+              },
+            }
+          : n,
+      ),
     });
     // Yeni modelde karşılığı olmayan ya da tipi uymayan kablolar kaldırılır.
     const { nodes, edges } = get();
@@ -216,9 +292,77 @@ export const useCanvas = create<CanvasState>((set, get) => ({
     setTimeout(() => get().toast === msg && set({ toast: null }), 3500);
   },
 
+  // --- Geri al / yinele ------------------------------------------------------
+
+  undo: () => {
+    const prev = history.undo(snapshot(get().nodes, get().edges));
+    if (!prev) return;
+    set({ nodes: prev.nodes, edges: prev.edges, historyVersion: get().historyVersion + 1 });
+  },
+
+  redo: () => {
+    const next = history.redo(snapshot(get().nodes, get().edges));
+    if (!next) return;
+    set({ nodes: next.nodes, edges: next.edges, historyVersion: get().historyVersion + 1 });
+  },
+
+  canUndo: () => history.past.length > 0,
+  canRedo: () => history.future.length > 0,
+
+  // --- Kopyala / yapıştır ----------------------------------------------------
+
+  copySelection: () => {
+    const selected = get().nodes.filter((n) => n.selected);
+    if (!selected.length) return null;
+    const clip = packNodes(selected, get().edges, get().jobsFor);
+    memoryClip = clip;
+    pasteCount = 0;
+    navigator.clipboard?.writeText(JSON.stringify(clip)).catch(() => {});
+    get().showToast(`${selected.length} node kopyalandı`);
+    return clip;
+  },
+
+  paste: (clip) => {
+    const source = clip ?? memoryClip;
+    if (!source?.nodes.length) return;
+    checkpoint();
+    pasteCount++;
+    const { nodes, edges } = cloneWithNewIds(source, { x: 40 * pasteCount, y: 40 * pasteCount }, newId);
+    set({
+      nodes: [...get().nodes.map((n) => ({ ...n, selected: false })), ...nodes],
+      edges: [...get().edges, ...edges],
+    });
+  },
+
+  duplicateSelection: () => {
+    const selected = get().nodes.filter((n) => n.selected);
+    if (!selected.length) return;
+    const clip = packNodes(selected, get().edges, get().jobsFor);
+    pasteCount = 0;
+    get().paste(clip);
+  },
+
+  /** Projeyi tek JSON olarak dışa aktarır. Model çıktıları dosya yolu olarak (pinned) eklenir. */
+  exportProject: () => {
+    const all = packNodes(get().nodes, get().edges, get().jobsFor);
+    const doc = {
+      app: 'brainlab-kanvas/project',
+      schemaVersion: 1,
+      name: get().projectName,
+      exportedAt: new Date().toISOString(),
+      nodes: all.nodes,
+      edges: all.edges,
+      viewport: get().viewport,
+    };
+    return { name: get().projectName || 'proje', data: JSON.stringify(doc, null, 2) };
+  },
+
+  // --- Görevler ---------------------------------------------------------------
+
   setJobs: (list) => set({ jobs: Object.fromEntries(list.map((j) => [j.id, j])) }),
 
   upsertJob: (job) => {
+    if (job.projectId !== get().projectId) return;
     const prev = get().jobs[job.id];
     const finished = RUNNING_STATES.includes(prev?.state ?? 'submitting') && !RUNNING_STATES.includes(job.state);
     set({
@@ -232,6 +376,13 @@ export const useCanvas = create<CanvasState>((set, get) => ({
     Object.values(get().jobs)
       .filter((j) => j.nodeId === nodeId)
       .sort((a, b) => b.createdAt - a.createdAt),
+
+  refreshJobs: async () => {
+    const pid = get().projectId;
+    if (!pid) return;
+    const list = await api<Job[]>(`/jobs?projectId=${encodeURIComponent(pid)}`);
+    if (get().projectId === pid) get().setJobs(list);
+  },
 
   gatherInputs: (nodeId) => {
     const { nodes, edges, jobsFor } = get();
@@ -292,7 +443,8 @@ export const useCanvas = create<CanvasState>((set, get) => ({
   /** Tek bir model node'u için görev başlatır. Önbellekte eşleşen çıktı varsa (force değilse) onu kullanır. */
   startNode: async (nodeId, force) => {
     const node = get().nodes.find((n) => n.id === nodeId);
-    if (!node || node.type !== 'model') return 'failed';
+    const projectId = get().projectId;
+    if (!node || node.type !== 'model' || !projectId) return 'failed';
     const d = node.data as unknown as ModelData;
     const def = getModel(d.modelId);
     const issues = get().issuesFor(nodeId);
@@ -304,8 +456,17 @@ export const useCanvas = create<CanvasState>((set, get) => ({
     if (!force) {
       const built = buildRequest(def, d.params, inputs);
       const cached = findCachedJob(get().jobsFor(nodeId), built.kieModel, built.input);
-      if (cached) {
-        if (d.selectedJobId && d.selectedJobId !== cached.id) get().updateData(nodeId, { selectedJobId: cached.id });
+      // Kopyalanmış node'un taşıdığı çıktı da aynı girdiden geldiyse güncel sayılır.
+      const pinnedFresh =
+        !cached &&
+        !!d.pinned?.ref &&
+        !!findCachedJob(
+          [{ id: 'pinned', state: 'success', files: ['x'], kieModel: d.pinned.kieModel, input: d.pinned.input } as Job],
+          built.kieModel,
+          built.input,
+        );
+      if (cached || pinnedFresh) {
+        if (cached && d.selectedJobId && d.selectedJobId !== cached.id) get().updateData(nodeId, { selectedJobId: cached.id });
         get().setRunStatus(nodeId, { state: 'cached' });
         clearBlockedDownstream(nodeId);
         return 'ok';
@@ -317,10 +478,14 @@ export const useCanvas = create<CanvasState>((set, get) => ({
       const job = await api<Job>('/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ projectId: PROJECT_ID, nodeId, modelId: d.modelId, params: d.params, inputs }),
+        body: JSON.stringify({ projectId, nodeId, modelId: d.modelId, params: d.params, inputs }),
       });
       get().upsertJob(job);
-      get().updateData(nodeId, { selectedJobId: undefined });
+      set({
+        nodes: get().nodes.map((n) =>
+          n.id === nodeId ? { ...n, data: { ...n.data, selectedJobId: undefined, pinned: undefined } } : n,
+        ),
+      });
       return (await waitForJob(job.id)) === 'success' ? 'ok' : 'failed';
     } catch (err) {
       get().updateData(nodeId, { runError: (err as Error).message });
@@ -399,23 +564,45 @@ export const useCanvas = create<CanvasState>((set, get) => ({
     return get().runPipeline(ids, false);
   },
 
-  load: async () => {
-    if (get().loaded) return;
-    set({ loadError: null });
-    // Başlangıç grafiği SADECE proje gerçekten yoksa (404) açılır. Diğer hatalarda kayıtlı
-    // projenin üzerine yazmamak için kanvas açılmaz ve otomatik kaydetme devre dışı kalır.
+  // --- Proje ------------------------------------------------------------------
+
+  load: async (projectId) => {
+    if (get().projectId === projectId && get().loaded) return;
+    await flushSave();
+    history.clear();
+    pasteCount = 0;
+    set({
+      projectId,
+      projectName: '',
+      nodes: [],
+      edges: [],
+      viewport: undefined,
+      jobs: {},
+      runStatus: {},
+      loaded: false,
+      loadError: null,
+      saveState: 'idle',
+      historyVersion: get().historyVersion + 1,
+    });
+    // Proje yüklenemezse kanvas açılmaz ve otomatik kaydetme çalışmaz (kayıtlı dosyanın üzerine yazılmaz).
     for (let attempt = 0; attempt < 4; attempt++) {
       try {
-        const p = await api<{ nodes: AppNode[]; edges: AppEdge[]; viewport?: Viewport }>(`/projects/${PROJECT_ID}`, {
-          timeoutMs: 8000,
+        const p = await api<ProjectDoc>(`/projects/${encodeURIComponent(projectId)}`, { timeoutMs: 8000 });
+        if (get().projectId !== projectId) return;
+        set({
+          projectName: p.name ?? 'Adsız proje',
+          nodes: p.nodes ?? [],
+          edges: p.edges ?? [],
+          viewport: p.viewport,
+          loaded: true,
+          saveState: 'saved',
         });
-        if (get().loaded) return;
-        set({ nodes: p.nodes ?? [], edges: p.edges ?? [], viewport: p.viewport, loaded: true, saveState: 'saved' });
+        get().refreshJobs().catch(() => {});
         return;
       } catch (err) {
-        if (get().loaded) return;
+        if (get().projectId !== projectId) return;
         if (err instanceof ApiError && err.status === 404) {
-          set({ ...starterGraph(), loaded: true });
+          set({ loadError: 'Proje bulunamadı' });
           return;
         }
         if (attempt === 3) {
@@ -426,10 +613,26 @@ export const useCanvas = create<CanvasState>((set, get) => ({
       }
     }
   },
+
+  rename: async (name) => {
+    const pid = get().projectId;
+    const clean = name.trim().slice(0, 120);
+    if (!pid || !clean || clean === get().projectName) return;
+    set({ projectName: clean });
+    try {
+      await api(`/projects/${encodeURIComponent(pid)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: clean }),
+      });
+    } catch (err) {
+      get().showToast(`Ad kaydedilemedi: ${(err as Error).message}`);
+    }
+  },
 }));
 
-/** İlk açılışta örnek zincir: Prompt → Nano Banana 2 → Önizleme */
-function starterGraph(): Pick<CanvasState, 'nodes' | 'edges'> {
+/** Yeni projeler için örnek zincir: Prompt → Nano Banana 2 → Önizleme */
+export function starterGraph(): { nodes: AppNode[]; edges: AppEdge[] } {
   const nodes: AppNode[] = [
     { id: 'prompt-start', type: 'prompt', position: { x: 0, y: 80 }, data: { text: '' } },
     {
@@ -471,6 +674,7 @@ if (import.meta.hot) import.meta.hot.accept(() => location.reload());
 // --- Otomatik kaydetme ------------------------------------------------------
 
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
+let savePending = false;
 
 function persistable(nodes: AppNode[]) {
   return nodes.map(({ id, type, position, data, width, height }) => {
@@ -481,36 +685,50 @@ function persistable(nodes: AppNode[]) {
   });
 }
 
-useCanvas.subscribe((state, prev) => {
-  if (!state.loaded) return;
-  if (state.nodes === prev.nodes && state.edges === prev.edges && state.viewport === prev.viewport) return;
-  // Yalnızca seçim/sürükleme ara durumları değiştiyse de kaydeder; 800 ms toplanır.
+async function saveNow() {
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(async () => {
-    const { nodes, edges, viewport } = useCanvas.getState();
-    useCanvas.setState({ saveState: 'saving' });
-    try {
-      await api(`/projects/${PROJECT_ID}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          schemaVersion: 1,
-          nodes: persistable(nodes),
-          edges: edges.map(({ id, source, sourceHandle, target, targetHandle, data, className }) => ({
-            id,
-            source,
-            sourceHandle,
-            target,
-            targetHandle,
-            data,
-            className,
-          })),
-          viewport,
-        }),
-      });
-      useCanvas.setState({ saveState: 'saved' });
-    } catch {
-      useCanvas.setState({ saveState: 'error' });
-    }
-  }, 800);
+  savePending = false;
+  const { nodes, edges, viewport, loaded, projectId } = useCanvas.getState();
+  if (!loaded || !projectId) return;
+  useCanvas.setState({ saveState: 'saving' });
+  try {
+    await api(`/projects/${encodeURIComponent(projectId)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        schemaVersion: 1,
+        nodes: persistable(nodes),
+        edges: edges.map(({ id, source, sourceHandle, target, targetHandle, data, className }) => ({
+          id,
+          source,
+          sourceHandle,
+          target,
+          targetHandle,
+          data,
+          className,
+        })),
+        viewport,
+      }),
+    });
+    if (useCanvas.getState().projectId === projectId) useCanvas.setState({ saveState: 'saved' });
+  } catch {
+    if (useCanvas.getState().projectId === projectId) useCanvas.setState({ saveState: 'error' });
+  }
+}
+
+/** Proje değiştirilmeden önce bekleyen kaydı hemen yazar. */
+async function flushSave() {
+  if (savePending) await saveNow();
+}
+
+useCanvas.subscribe((state, prev) => {
+  if (!state.loaded || state.projectId !== prev.projectId || !prev.loaded) return;
+  if (state.nodes === prev.nodes && state.edges === prev.edges && state.viewport === prev.viewport) return;
+  clearTimeout(saveTimer);
+  savePending = true;
+  saveTimer = setTimeout(saveNow, 800);
+});
+
+window.addEventListener('beforeunload', () => {
+  if (savePending) void saveNow();
 });

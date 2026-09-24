@@ -5,9 +5,10 @@ import { buildRequest, getModel, type ParamValues, type PortValues, ValidationEr
 import type { FastifyInstance } from 'fastify';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
-import { readFile, rename, writeFile } from 'node:fs/promises';
+import { rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { JobManager } from '../jobs/manager.js';
+import { projectRoutes } from './projects.js';
 
 const IMAGE_TYPES: Record<string, string> = {
   'image/png': '.png',
@@ -78,23 +79,5 @@ export async function canvasRoutes(
     }
   });
 
-  // Proje kaydı: tek JSON dosyası.
-  const projectFile = (id: string) => {
-    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(id)) throw new Error('Geçersiz proje id');
-    return join(projectsDir, `${id}.json`);
-  };
-
-  app.get<{ Params: { id: string } }>('/api/projects/:id', async (req, reply) => {
-    const file = projectFile(req.params.id);
-    if (!existsSync(file)) return reply.code(404).send({ error: 'Proje yok' });
-    return JSON.parse(await readFile(file, 'utf8'));
-  });
-
-  app.put<{ Params: { id: string }; Body: Record<string, unknown> }>('/api/projects/:id', async (req) => {
-    const file = projectFile(req.params.id);
-    const body = { ...req.body, id: req.params.id, savedAt: new Date().toISOString() };
-    await writeFile(file + '.part', JSON.stringify(body));
-    await rename(file + '.part', file);
-    return { ok: true, savedAt: body.savedAt };
-  });
+  await app.register(projectRoutes, { projectsDir, jobs });
 }

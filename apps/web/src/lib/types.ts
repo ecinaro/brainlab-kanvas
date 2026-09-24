@@ -20,6 +20,16 @@ export interface ModelData {
   selectedJobId?: string;
   /** Çalıştırma öncesi (istemci/sunucu) hata mesajı */
   runError?: string;
+  /** Kopyalanan/içe aktarılan node'un taşıdığı çıktı (node'un kendi görevi yoksa kullanılır) */
+  pinned?: PinnedOutput;
+}
+
+export interface PinnedOutput {
+  type: import('@brainlab-kanvas/catalog').PortType;
+  ref?: string;
+  url?: string;
+  kieModel?: string;
+  input?: Record<string, unknown>;
 }
 export type PreviewData = Record<string, never>;
 export interface NoteData {

@@ -106,6 +106,35 @@ describe('/api/projects', () => {
     expect(res.json()).toMatchObject({ id: 'default', nodes: [{ id: 'a' }] });
   });
 
+  it('oluşturur, listeler, adı korur/değiştirir ve silince çöpe taşır', async () => {
+    const { app } = setup();
+    const created = await app.inject({ method: 'POST', url: '/api/projects', headers, payload: { name: '  Deneme  ' } });
+    expect(created.statusCode).toBe(201);
+    const id = created.json().id;
+    expect(created.json().name).toBe('Deneme');
+
+    // Ad gönderilmeden kaydetmek adı korur
+    await app.inject({ method: 'PUT', url: `/api/projects/${id}`, headers, payload: { nodes: [{ id: 'n' }], edges: [] } });
+    let list = (await app.inject({ url: '/api/projects', headers })).json();
+    expect(list).toEqual([expect.objectContaining({ id, name: 'Deneme', nodeCount: 1, thumbnail: null })]);
+
+    await app.inject({ method: 'PUT', url: `/api/projects/${id}`, headers, payload: { name: 'Yeni ad' } });
+    expect((await app.inject({ url: `/api/projects/${id}`, headers })).json()).toMatchObject({ name: 'Yeni ad', nodes: [{ id: 'n' }] });
+
+    const del = await app.inject({ method: 'DELETE', url: `/api/projects/${id}`, headers });
+    expect(del.statusCode).toBe(200);
+    list = (await app.inject({ url: '/api/projects', headers })).json();
+    expect(list).toEqual([]);
+    const { readdirSync } = await import('node:fs');
+    expect(readdirSync(join(dataDir, 'projects/.trash'))).toHaveLength(1);
+  });
+
+  it('içe aktarmada nodes dizi değilse reddedilir', async () => {
+    const { app } = setup();
+    const res = await app.inject({ method: 'POST', url: '/api/projects', headers, payload: { nodes: 'x' } });
+    expect(res.statusCode).toBe(400);
+  });
+
   it('geçersiz proje id reddedilir', async () => {
     const { app } = setup();
     const res = await app.inject({ url: '/api/projects/..%2F..%2Fx', headers });

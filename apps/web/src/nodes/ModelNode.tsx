@@ -108,6 +108,16 @@ export function ModelNode({ id, data, selected }: NodeProps<AppNode>) {
       <div className="mx-2 overflow-hidden rounded-lg border border-line bg-bg">
         {shown ? (
           <MediaView url={shown.mediaUrls[0]} type={shown.outputType ?? 'image'} className="max-h-80" />
+        ) : d.pinned?.url ? (
+          <div className="relative">
+            <MediaView url={d.pinned.url} type={d.pinned.type} className="max-h-80" />
+            <span
+              className="absolute left-1.5 top-1.5 rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-muted"
+              title="Bu çıktı kopyalanan node'dan geldi; çalıştırınca yenisi üretilir"
+            >
+              kopyadan
+            </span>
+          </div>
         ) : (
           <div className="flex h-40 items-center justify-center text-[11px] text-muted">
             {running || pending ? '' : 'Henüz çıktı yok'}

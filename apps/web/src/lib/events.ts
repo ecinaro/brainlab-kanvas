@@ -1,10 +1,10 @@
-import { api } from '../api';
-import { PROJECT_ID, useCanvas } from '../store';
+import { useCanvas } from '../store';
 import type { Job } from './types';
 
 /**
  * Sunucudaki görev güncellemelerini SSE ile dinler. EventSource özel başlık gönderemediği için
- * fetch akışı kullanılır. Bağlantı koparsa yeniden bağlanır ve tam durumu yeniden çeker.
+ * fetch akışı kullanılır. Bağlantı koparsa yeniden bağlanır ve açık projenin tam durumunu yeniden çeker.
+ * Başka projelere ait güncellemeler store'da yok sayılır.
  */
 export function startJobStream(): () => void {
   let stopped = false;
@@ -17,7 +17,7 @@ export function startJobStream(): () => void {
         const res = await fetch('/api/events', { headers: { 'X-Canvas-Client': '1' }, signal: ctrl.signal });
         if (!res.ok || !res.body) throw new Error(`events ${res.status}`);
         // Bağlandıktan sonra kaçırılan güncellemeler için tam liste.
-        useCanvas.getState().setJobs(await api<Job[]>(`/jobs?projectId=${PROJECT_ID}`));
+        await useCanvas.getState().refreshJobs();
 
         const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
         let buf = '';
@@ -35,8 +35,7 @@ export function startJobStream(): () => void {
               .map((l) => l.slice(6))
               .join('\n');
             if (!data || !chunk.includes('event: job')) continue;
-            const job = JSON.parse(data) as Job;
-            if (job.projectId === PROJECT_ID) useCanvas.getState().upsertJob(job);
+            useCanvas.getState().upsertJob(JSON.parse(data) as Job);
           }
         }
       } catch {
