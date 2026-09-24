@@ -15,13 +15,26 @@ API key yalnızca yerel sunucuda durur, tarayıcıya hiç gönderilmez. Tüm son
 
 ### 2. Kurulum (bir kez)
 
-Proje klasöründe:
+Projeyi bilgisayarına indir (Git kurulu olmalı: https://git-scm.com):
+
+```bash
+git clone https://github.com/ecinaro/brainlab-kanvas.git
+cd brainlab-kanvas
+```
+
+Git kullanmak istemezsen GitHub sayfasında **Code → Download ZIP** ile indirip klasöre çıkarabilirsin.
+
+> **Kısa yol:** Windows'ta klasördeki `BrainLab Kanvas.cmd` dosyasına çift tıkla; paketleri kurar, `.env`
+> dosyasını oluşturup Not Defteri'nde açar. Key'ini yapıştırıp kaydet, dosyaya tekrar çift tıkla. Bitti.
+
+Elle kurmak istersen proje klasöründe:
 
 ```bash
 npm install
 ```
 
-Ardından `.env.example` dosyasını `.env` adıyla kopyala ve key'ini yapıştır:
+Ardından `.env.example` dosyasını `.env` adıyla kopyala ve **kendi** Kie key'ini yapıştır
+(her kullanıcı kendi key'ini kullanır; repoda key yoktur):
 
 ```
 KIE_API_KEY=buraya_key
