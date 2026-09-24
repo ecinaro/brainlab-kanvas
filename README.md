@@ -8,6 +8,28 @@ API key yalnızca yerel sunucuda durur, tarayıcıya hiç gönderilmez. Tüm son
 
 ## Başlarken
 
+### ⚡ En kolay yol: kurulumu ajanına bırak
+
+Claude Code, Cursor, Codex gibi bir kodlama ajanı kullanıyorsan aşağıdaki metni kopyalayıp ona yapıştırman yeterli.
+Gerisini o halleder:
+
+```text
+Şu repoyu bilgisayarıma kur ve çalıştır: https://github.com/ecinaro/brainlab-kanvas
+
+- Node.js 22 veya üstü kurulu mu kontrol et; değilse nasıl kuracağımı söyle.
+- Repoyu klonla ve "npm install" ile paketleri kur.
+- .env.example dosyasını .env adıyla kopyala. KIE_API_KEY için bana sor
+  (ya da ben burada verirsem .env dosyasına yaz, başka hiçbir yere yazma ve commit etme).
+- "npm run dev" ile başlat ve http://127.0.0.1:5173 adresini tarayıcıda aç.
+- Kurulum bitince README.md'deki "Başlarken" bölümünü bana kısaca özetle.
+```
+
+> 🔑 **API key:** İstersen Kie.ai key'ini doğrudan ajana verebilirsin; `.env` dosyasına o yapıştırır.
+> Key o zaman ajanla yaptığın sohbette de yer alır. Bunu istemiyorsan ajan `.env` dosyasını oluşturduktan
+> sonra key'i dosyaya kendin yapıştır. `.env` hiçbir zaman git'e girmez.
+
+Kendin kurmak istersen aşağıdaki adımları izle.
+
 ### 1. Gereksinimler
 
 - **Node.js 22.5 veya üstü** (yerleşik `node:sqlite` kullanılıyor). Kontrol: `node -v`
