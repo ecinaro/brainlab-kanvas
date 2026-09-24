@@ -32,13 +32,17 @@ SERVER_PORT=8787
 
 ### 3. Çalıştırma
 
+**En kolay yol:** proje klasöründeki **`BrainLab Kanvas.cmd`** dosyasına çift tıkla. Node kurulu mu diye bakar,
+ilk seferde paketleri kurar, `.env` yoksa oluşturup Not Defteri'nde açar, sonra uygulamayı başlatıp
+tarayıcıda **http://127.0.0.1:5173** adresini açar. Kapatmak için açılan siyah pencereyi kapat.
+
+Terminalden:
+
 ```bash
 npm run dev
 ```
 
-Tarayıcıda aç: **http://127.0.0.1:5173**
-
-Kapatmak için terminalde `Ctrl+C`.
+Tarayıcıda aç: **http://127.0.0.1:5173** · Kapatmak için terminalde `Ctrl+C`.
 
 > **Kredi harcamadan denemek için:** `npm run dev:mock` → **http://127.0.0.1:5174**
 > Gerçek Kie yerine taklit sunucu kullanılır, veriler ayrı `data-mock/` klasöründe durur,
