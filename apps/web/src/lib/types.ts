@@ -22,6 +22,8 @@ export interface ModelData {
   runError?: string;
   /** Kopyalanan/içe aktarılan node'un taşıdığı çıktı (node'un kendi görevi yoksa kullanılır) */
   pinned?: PinnedOutput;
+  /** Tek çalıştırmada üretilecek adet (1-4) */
+  count?: number;
 }
 
 export interface PinnedOutput {

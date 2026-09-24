@@ -68,6 +68,10 @@ export class Store {
         updatedAt INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS jobs_project ON jobs(projectId, createdAt);
+      CREATE TABLE IF NOT EXISTS stars (
+        jobId TEXT PRIMARY KEY,
+        starredAt INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS uploads (
         hash TEXT PRIMARY KEY,
         url TEXT NOT NULL,
@@ -120,6 +124,23 @@ export class Store {
       .prepare(`SELECT * FROM jobs WHERE state NOT IN (${placeholders}) ORDER BY createdAt`)
       .all(...TERMINAL_STATES)
       .map((r) => this.decode(r as Record<string, unknown>)!);
+  }
+
+  /** Galeri: tüm projelerdeki başarılı görevler, en yeni önce. */
+  listSuccessful(limit = 500): JobRow[] {
+    return this.db
+      .prepare(`SELECT * FROM jobs WHERE state = 'success' ORDER BY finishedAt DESC LIMIT ?`)
+      .all(limit)
+      .map((r) => this.decode(r as Record<string, unknown>)!);
+  }
+
+  starredIds(): Set<string> {
+    return new Set((this.db.prepare('SELECT jobId FROM stars').all() as { jobId: string }[]).map((r) => r.jobId));
+  }
+
+  setStar(jobId: string, starred: boolean) {
+    if (starred) this.db.prepare('INSERT OR REPLACE INTO stars (jobId, starredAt) VALUES (?, ?)').run(jobId, Date.now());
+    else this.db.prepare('DELETE FROM stars WHERE jobId = ?').run(jobId);
   }
 
   getUpload(hash: string): { url: string; uploadedAt: number } | undefined {

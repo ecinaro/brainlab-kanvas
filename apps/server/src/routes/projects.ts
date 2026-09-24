@@ -102,6 +102,47 @@ export async function projectRoutes(app: FastifyInstance, opts: { projectsDir: s
     return { ok: true, savedAt: next.savedAt, name: next.name };
   });
 
+  // Galeri: tüm projelerdeki başarılı çıktılar, proje adı ve yıldız bilgisiyle.
+  app.get<{ Querystring: { limit?: string } }>('/api/gallery', async (req) => {
+    const names = new Map<string, string>();
+    for (const n of (await readdir(projectsDir)).filter((f) => f.endsWith('.json'))) {
+      try {
+        const p: ProjectFile = JSON.parse(await readFile(join(projectsDir, n), 'utf8'));
+        names.set(p.id, p.name || 'Adsız proje');
+      } catch {
+        /* bozuk dosya atlanır */
+      }
+    }
+    const stars = jobs.store.starredIds();
+    const limit = Math.min(Math.max(Number(req.query.limit) || 300, 1), 1000);
+    return jobs.store
+      .listSuccessful(limit)
+      .filter((j) => j.files.length)
+      .map((j) => ({
+        id: j.id,
+        projectId: j.projectId,
+        // Silinmiş (çöpe taşınmış) projelerin çıktıları da görünür; proje adı yoksa belirtilir.
+        projectName: names.get(j.projectId) ?? null,
+        nodeId: j.nodeId,
+        kieModel: j.kieModel,
+        input: j.input,
+        outputType: j.outputType,
+        mediaUrls: j.files.map((f) => `/${f}`),
+        files: j.files,
+        credits: j.credits,
+        taskId: j.taskId,
+        createdAt: j.createdAt,
+        finishedAt: j.finishedAt,
+        starred: stars.has(j.id),
+      }));
+  });
+
+  app.put<{ Params: { id: string }; Body: { starred?: boolean } }>('/api/jobs/:id/star', async (req, reply) => {
+    if (!jobs.get(req.params.id)) return reply.code(404).send({ error: 'Görev bulunamadı' });
+    jobs.store.setStar(req.params.id, !!req.body?.starred);
+    return { id: req.params.id, starred: !!req.body?.starred };
+  });
+
   app.delete<{ Params: { id: string } }>('/api/projects/:id', async (req, reply) => {
     const f = fileOf(req.params.id);
     if (!existsSync(f)) return reply.code(404).send({ error: 'Proje yok' });

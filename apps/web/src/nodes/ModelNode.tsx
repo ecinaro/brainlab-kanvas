@@ -30,6 +30,8 @@ export function ModelNode({ id, data, selected }: NodeProps<AppNode>) {
   const changeModel = useCanvas((s) => s.changeModel);
   const runNode = useCanvas((s) => s.runNode);
   const runStatus = useCanvas((s) => s.runStatus[id]);
+  const openCompare = useCanvas((s) => s.openCompare);
+  const addSibling = useCanvas((s) => s.addSibling);
 
   const jobs = useMemo(
     () => Object.values(allJobs).filter((j) => j.nodeId === id).sort((a, b) => b.createdAt - a.createdAt),
@@ -55,7 +57,9 @@ export function ModelNode({ id, data, selected }: NodeProps<AppNode>) {
   const failed =
     latest && (latest.state === 'fail' || latest.state === 'timeout') && runStatus?.state !== 'cached' ? latest : undefined;
   const connectedCount = (port: string) => edges.filter((e) => e.target === id && e.targetHandle === port).length;
-  const cost = def.cost(withDefaults(def, d.params), useCanvas.getState().gatherInputs(id).inputs);
+  const count = Math.min(Math.max(Number(d.count) || 1, 1), 4);
+  const unitCost = def.cost(withDefaults(def, d.params), useCanvas.getState().gatherInputs(id).inputs);
+  const cost = unitCost && { ...unitCost, credits: unitCost.credits * count };
   const quickParams = def.params.filter((p) => !p.advanced);
   const successJobs = jobs.filter((j) => j.state === 'success' && j.mediaUrls.length);
 
@@ -189,10 +193,41 @@ export function ModelNode({ id, data, selected }: NodeProps<AppNode>) {
         )
       )}
 
+      {latest?.credits != null && latest.state === 'success' && (
+        <div className="px-3 pt-1.5 text-[10px] text-muted">Son: {latest.credits} kr harcandı</div>
+      )}
+
       <div className="flex items-center justify-between gap-2 p-2">
-        <span className="truncate text-[10px] text-muted">
-          {latest?.credits != null && latest.state === 'success' ? `Son: ${latest.credits} kr harcandı` : ''}
-        </span>
+        <div className="flex items-center gap-1">
+          <select
+            value={count}
+            onChange={(e) => updateData(id, { count: Number(e.target.value) })}
+            title="Tek çalıştırmada kaç adet üretilsin (her biri ayrı ücretlenir)"
+            className="nodrag rounded-md border border-line bg-bg px-1 py-1 text-[11px] text-fg outline-none focus:border-muted"
+          >
+            {[1, 2, 3, 4].map((n) => (
+              <option key={n} value={n}>
+                ×{n}
+              </option>
+            ))}
+          </select>
+          {successJobs.length > 1 && (
+            <button
+              onClick={() => openCompare({ mode: 'node', nodeId: id })}
+              title="Bu node'un çıktılarını yan yana karşılaştır ve birini seç"
+              className="nodrag rounded-md border border-line px-2 py-1 text-[11px] text-muted hover:border-muted hover:text-fg"
+            >
+              Karşılaştır
+            </button>
+          )}
+          <button
+            onClick={() => addSibling(id)}
+            title="Aynı girdilerle farklı bir modeli yanına ekle (karşılaştırmak için)"
+            className="nodrag rounded-md border border-line px-2 py-1 text-[11px] text-muted hover:border-muted hover:text-fg"
+          >
+            + Kardeş
+          </button>
+        </div>
         <button
           onClick={() => runNode(id)}
           disabled={running || pending}

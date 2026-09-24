@@ -97,6 +97,29 @@ describe('/api/uploads', () => {
   });
 });
 
+describe('/api/gallery', () => {
+  it('başarılı çıktıları proje adıyla listeler; yıldız eklenip kaldırılabilir', async () => {
+    const { app, jobs } = setup();
+    const p = (await app.inject({ method: 'POST', url: '/api/projects', headers, payload: { name: 'Galeri testi' } })).json();
+    await app.inject({
+      method: 'POST',
+      url: '/api/run',
+      headers,
+      payload: { projectId: p.id, nodeId: 'n', modelId: 'nano-banana-2', inputs: { prompt: ['kedi'] } },
+    });
+    await jobs.idle();
+    let g = (await app.inject({ url: '/api/gallery', headers })).json();
+    expect(g).toEqual([
+      expect.objectContaining({ projectName: 'Galeri testi', kieModel: 'nano-banana-2', starred: false, input: expect.objectContaining({ prompt: 'kedi' }) }),
+    ]);
+    expect(g[0].mediaUrls[0]).toMatch(/^\/media\//);
+    await app.inject({ method: 'PUT', url: `/api/jobs/${g[0].id}/star`, headers, payload: { starred: true } });
+    g = (await app.inject({ url: '/api/gallery', headers })).json();
+    expect(g[0].starred).toBe(true);
+    expect((await app.inject({ method: 'PUT', url: '/api/jobs/yok/star', headers, payload: { starred: true } })).statusCode).toBe(404);
+  });
+});
+
 describe('/api/settings', () => {
   it('varsayılanı döner, geçerli değeri kaydeder, geçersizi reddeder', async () => {
     const { app } = setup();

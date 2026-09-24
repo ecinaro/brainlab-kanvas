@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
-import { goProjects, type Route } from '../lib/route';
+import { goGallery, goProjects, type Route } from '../lib/route';
 import { useCanvas } from '../store';
 
 const SAVE_LABEL = { idle: '', saving: 'Kaydediliyor…', saved: 'Kaydedildi', error: 'Kaydedilemedi' } as const;
@@ -41,6 +41,20 @@ export function TopBar({ route }: { route: Route }) {
             Sahte mod
           </span>
         )}
+        <nav className="flex shrink-0 items-center gap-1 text-xs">
+          <button
+            onClick={goProjects}
+            className={`rounded-md px-2 py-1 ${route.view === 'projects' ? 'bg-raised text-fg' : 'text-muted hover:text-fg'}`}
+          >
+            Projeler
+          </button>
+          <button
+            onClick={goGallery}
+            className={`rounded-md px-2 py-1 ${route.view === 'gallery' ? 'bg-raised text-fg' : 'text-muted hover:text-fg'}`}
+          >
+            Galeri
+          </button>
+        </nav>
         {inCanvas && <ProjectTitle />}
       </div>
       <div className="flex shrink-0 items-center gap-2">

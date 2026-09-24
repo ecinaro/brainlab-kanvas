@@ -147,6 +147,10 @@ export class JobManager extends EventEmitter {
     return this.o.store.listJobs(projectId);
   }
 
+  get store() {
+    return this.o.store;
+  }
+
   /** Testler ve kapanış için: aktif işlerin bitmesini bekler. */
   async idle() {
     while (this.active.size) await new Promise((r) => setTimeout(r, 5));

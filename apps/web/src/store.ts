@@ -71,6 +71,9 @@ interface MissingInput {
 /** pendingUpstream: hata değil, zincir çalışınca giderilecek bir eksik */
 export type NodeIssue = Issue & { pendingUpstream?: boolean };
 
+/** node: bir node'un N çıktısı arasından seçim; fanout: birden fazla model node'unun çıktıları yan yana */
+export type CompareRequest = { mode: 'node'; nodeId: string } | { mode: 'fanout'; nodeIds: string[] };
+
 export interface ConfirmRequest {
   estimate: RunEstimate;
   reasons: string[];
@@ -141,7 +144,7 @@ function checkpoint(key?: string) {
 }
 
 /** Kullanıcının değiştirdiği (geri alınabilir) veri alanları; çalıştırma durumu gibi sistem alanları hariç. */
-const USER_DATA_KEYS = new Set(['text', 'params', 'modelId', 'selectedJobId', 'ref']);
+const USER_DATA_KEYS = new Set(['text', 'params', 'modelId', 'selectedJobId', 'ref', 'count']);
 
 interface CanvasState {
   projectId: string | null;
@@ -175,6 +178,13 @@ interface CanvasState {
   copySelection: () => ClipPayload | null;
   paste: (clip?: ClipPayload | null) => void;
   duplicateSelection: () => void;
+  insertClip: (clip: ClipPayload, at: XYPosition) => void;
+  addSibling: (nodeId: string) => string | null;
+  compare: CompareRequest | null;
+  openCompare: (req: CompareRequest) => void;
+  closeCompare: () => void;
+  pickOutput: (nodeId: string, jobId: string) => void;
+  promoteWinner: (winnerId: string, nodeIds: string[]) => number;
   exportProject: () => { name: string; data: string };
 
   setJobs: (jobs: Job[]) => void;
@@ -226,6 +236,7 @@ export const useCanvas = create<CanvasState>((set, get) => ({
   historyVersion: 0,
   toast: null,
   confirm: null,
+  compare: null,
   halt: null,
   credits: null,
   creditsError: null,
@@ -375,6 +386,92 @@ export const useCanvas = create<CanvasState>((set, get) => ({
     });
   },
 
+  insertClip: (clip, at) => {
+    if (!clip.nodes.length) return;
+    checkpoint();
+    const { nodes, edges } = cloneWithNewIds(clip, at, newId);
+    set({
+      nodes: [...get().nodes.map((n) => ({ ...n, selected: false })), ...nodes],
+      edges: [...get().edges, ...edges],
+    });
+  },
+
+  /** Aynı girdilerle, aynı türden bir sonraki modeli kullanan kardeş node ekler (fan-out). */
+  addSibling: (nodeId) => {
+    const node = get().nodes.find((n) => n.id === nodeId);
+    if (!node || node.type !== 'model') return null;
+    const d = node.data as unknown as ModelData;
+    const def = getModel(d.modelId);
+    if (!def) return null;
+    const sameKind = MODELS.filter((m) => m.kind === def.kind);
+    const used = new Set(
+      get()
+        .nodes.filter((n) => n.type === 'model')
+        .map((n) => (n.data as unknown as ModelData).modelId),
+    );
+    const next =
+      sameKind.find((m) => !used.has(m.id) && m.id !== def.id) ??
+      sameKind[(sameKind.indexOf(def) + 1) % sameKind.length];
+    checkpoint();
+    const id = newId('model');
+    const height = node.measured?.height ?? node.height ?? 520;
+    const sibling: AppNode = {
+      id,
+      type: 'model',
+      position: { x: node.position.x, y: node.position.y + height + 40 },
+      data: { modelId: next.id, params: withDefaults(next, d.params), count: d.count },
+      selected: true,
+    };
+    // Gelen kablolar kopyalanır; yeni modelde karşılığı olmayanlar atlanır.
+    const incoming = get().edges.filter((e) => e.target === nodeId);
+    const nodes = [...get().nodes.map((n) => ({ ...n, selected: false })), sibling];
+    const newEdges: AppEdge[] = [];
+    for (const e of incoming) {
+      const c = { source: e.source, sourceHandle: e.sourceHandle ?? null, target: id, targetHandle: e.targetHandle ?? null };
+      const check = checkConnection(nodes, [...get().edges, ...newEdges], c);
+      if (check.ok) {
+        newEdges.push({ ...c, id: `e-${c.source}-${c.sourceHandle}-${id}-${c.targetHandle}`, data: { type: check.type }, className: `edge-${check.type}` } as AppEdge);
+      }
+    }
+    set({ nodes, edges: [...get().edges, ...newEdges] });
+    return id;
+  },
+
+  openCompare: (req) => set({ compare: req }),
+  closeCompare: () => set({ compare: null }),
+
+  /** Karşılaştırmada seçilen kazanan: node'un aşağı akışa verdiği çıktı olur. */
+  pickOutput: (nodeId, jobId) => {
+    get().updateData(nodeId, { selectedJobId: jobId });
+  },
+
+  /**
+   * Fan-out karşılaştırmasında kazanan node: diğer karşılaştırılan node'ların çıkış kabloları
+   * (tip uyuyorsa) kazanana taşınır; böylece zincir kazananla devam eder.
+   */
+  promoteWinner: (winnerId, nodeIds) => {
+    const { nodes, edges } = get();
+    const losers = new Set(nodeIds.filter((id) => id !== winnerId));
+    const moving = edges.filter((e) => losers.has(e.source));
+    if (!moving.length) return 0;
+    checkpoint();
+    let kept = edges.filter((e) => !losers.has(e.source));
+    let moved = 0;
+    for (const e of moving) {
+      const c = { source: winnerId, sourceHandle: 'out', target: e.target, targetHandle: e.targetHandle ?? null };
+      const check = checkConnection(nodes, kept, c);
+      if (!check.ok) {
+        kept.push(e); // taşınamayan kablo yerinde kalır
+        continue;
+      }
+      if (check.replaceEdgeId) kept = kept.filter((x) => x.id !== check.replaceEdgeId);
+      kept.push({ ...c, id: `e-${winnerId}-out-${e.target}-${e.targetHandle}`, data: { type: check.type }, className: `edge-${check.type}` } as AppEdge);
+      moved++;
+    }
+    set({ edges: kept });
+    return moved;
+  },
+
   duplicateSelection: () => {
     const selected = get().nodes.filter((n) => n.selected);
     if (!selected.length) return;
@@ -516,23 +613,35 @@ export const useCanvas = create<CanvasState>((set, get) => ({
     }
     get().updateData(nodeId, { runError: undefined });
     get().setRunStatus(nodeId, null);
-    try {
-      const job = await api<Job>('/run', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ projectId, nodeId, modelId: d.modelId, params: d.params, inputs }),
-      });
-      get().upsertJob(job);
-      set({
-        nodes: get().nodes.map((n) =>
-          n.id === nodeId ? { ...n, data: { ...n.data, selectedJobId: undefined, pinned: undefined } } : n,
-        ),
-      });
-      return (await waitForJob(job.id)) === 'success' ? 'ok' : 'failed';
-    } catch (err) {
-      get().updateData(nodeId, { runError: (err as Error).message });
+    // Adet (N) üretim: aynı girdiyle N ayrı görev; en az biri başarılıysa adım başarılı sayılır.
+    const count = Math.min(Math.max(Number(d.count) || 1, 1), 4);
+    const started: Job[] = [];
+    let lastError: string | null = null;
+    for (let i = 0; i < count; i++) {
+      try {
+        const job = await api<Job>('/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ projectId, nodeId, modelId: d.modelId, params: d.params, inputs }),
+        });
+        get().upsertJob(job);
+        started.push(job);
+      } catch (err) {
+        lastError = (err as Error).message;
+        break;
+      }
+    }
+    if (!started.length) {
+      get().updateData(nodeId, { runError: lastError ?? 'Görev başlatılamadı' });
       return 'failed';
     }
+    set({
+      nodes: get().nodes.map((n) =>
+        n.id === nodeId ? { ...n, data: { ...n.data, selectedJobId: undefined, pinned: undefined } } : n,
+      ),
+    });
+    const results = await Promise.all(started.map((j) => waitForJob(j.id)));
+    return results.includes('success') ? 'ok' : 'failed';
   },
 
   /**
@@ -656,7 +765,8 @@ export const useCanvas = create<CanvasState>((set, get) => ({
         const d = nodes.find((n) => n.id === id)?.data as unknown as ModelData | undefined;
         const def = d && getModel(d.modelId);
         if (!def || !d) return null;
-        return def.cost(withDefaults(def, d.params), get().gatherInputs(id).inputs)?.credits ?? null;
+        const unit = def.cost(withDefaults(def, d.params), get().gatherInputs(id).inputs)?.credits;
+        return unit == null ? null : unit * Math.min(Math.max(Number(d.count) || 1, 1), 4);
       },
       new Set(forceTargets ? targets : []),
     );
