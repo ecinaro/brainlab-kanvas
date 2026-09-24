@@ -14,6 +14,8 @@ export interface FakeKieOptions {
   downloadFailures?: number;
   /** true dönerse görev "fail" ile biter (sahte modda "[fail]" içeren prompt'lar için) */
   failWhen?: (input: Record<string, unknown>) => boolean;
+  /** Sayı dönerse createTask bu Kie hata koduyla reddedilir (sahte modda "[402]" için) */
+  createErrorWhen?: (input: Record<string, unknown>) => number | undefined;
   /** Sonuç indirmelerinde döndürülecek gerçek dosya içerikleri (sahte mod önizlemesi için) */
   sampleImage?: Uint8Array;
   sampleVideo?: Uint8Array;
@@ -45,7 +47,7 @@ export class FakeKie {
     if (url.pathname === '/api/v1/jobs/createTask' && method === 'POST') {
       const body = JSON.parse(String(init?.body));
       this.createCalls.push(body);
-      const err = this.opts.createErrors?.shift();
+      const err = this.opts.createErrors?.shift() ?? this.opts.createErrorWhen?.(body.input);
       if (err) return json({ code: err, msg: `fake error ${err}`, data: null }, err >= 500 ? err : 200);
       const taskId = `task_${++this.seq}`;
       const isVideo = /video|kling|seedance|hailuo/.test(String(body.model));

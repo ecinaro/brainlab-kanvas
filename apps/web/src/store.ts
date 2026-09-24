@@ -22,7 +22,14 @@ import { api, ApiError } from './api';
 import { cloneWithNewIds, type ClipPayload, packNodes } from './lib/clipboard';
 import { checkConnection } from './lib/connections';
 import { History, snapshot } from './lib/history';
-import { directModelDeps, findCachedJob, planRun } from './lib/pipeline';
+import {
+  confirmReasons,
+  directModelDeps,
+  estimatePlan,
+  findCachedJob,
+  planRun,
+  type RunEstimate,
+} from './lib/pipeline';
 import { outputOf } from './lib/ports';
 import {
   type AppEdge,
@@ -63,6 +70,19 @@ interface MissingInput {
 
 /** pendingUpstream: hata değil, zincir çalışınca giderilecek bir eksik */
 export type NodeIssue = Issue & { pendingUpstream?: boolean };
+
+export interface ConfirmRequest {
+  estimate: RunEstimate;
+  reasons: string[];
+  resolve: (ok: boolean) => void;
+}
+
+/** Kuyruğu durdurması gereken Kie hata kodları */
+const HALT_MESSAGES: Record<string, string> = {
+  '401': 'API key geçersiz. Proje klasöründeki .env dosyasında yer alan Kie key değerini kontrol edin.',
+  '402': 'Kie kredisi yetersiz. Bakiye yükledikten sonra tekrar deneyin.',
+  '433': 'Alt key kullanım sınırı aşıldı.',
+};
 
 interface ProjectDoc {
   id: string;
@@ -171,6 +191,22 @@ interface CanvasState {
   runPipeline: (targets: string[], forceTargets: boolean) => Promise<void>;
   runNode: (nodeId: string) => Promise<void>;
   runAll: () => Promise<void>;
+  isFresh: (nodeId: string) => boolean;
+  estimate: (targets: string[], forceTargets: boolean) => RunEstimate | null;
+  /** Tahmin → gerekirse onay → çalıştırma. runNode/runAll bunu kullanır. */
+  requestRun: (targets: string[], forceTargets: boolean) => Promise<void>;
+  confirm: ConfirmRequest | null;
+  resolveConfirm: (ok: boolean) => void;
+  /** 401/402 gibi tüm kuyruğu durduran hata */
+  halt: { code: string; message: string } | null;
+  clearHalt: () => void;
+
+  credits: number | null;
+  creditsError: string | null;
+  refreshCredits: () => Promise<void>;
+  settings: { costConfirmThreshold: number };
+  loadSettings: () => Promise<void>;
+  saveSettings: (s: Partial<{ costConfirmThreshold: number }>) => Promise<void>;
 
   load: (projectId: string) => Promise<void>;
   rename: (name: string) => Promise<void>;
@@ -189,6 +225,11 @@ export const useCanvas = create<CanvasState>((set, get) => ({
   creditsVersion: 0,
   historyVersion: 0,
   toast: null,
+  confirm: null,
+  halt: null,
+  credits: null,
+  creditsError: null,
+  settings: { costConfirmThreshold: 20 },
 
   onNodesChange: (changes) => {
     if (changes.some((c) => c.type === 'remove')) checkpoint();
@@ -364,12 +405,24 @@ export const useCanvas = create<CanvasState>((set, get) => ({
   upsertJob: (job) => {
     if (job.projectId !== get().projectId) return;
     const prev = get().jobs[job.id];
+    // Sıra dışı gelen eski güncellemeler yok sayılır: /api/run yanıtı, canlı akıştan gelen daha yeni
+    // "fail" durumundan sonra gelebilir (402/422 gibi anında dönen hatalarda). Aynı zaman damgasında
+    // biten görev geri açılmaz; "izlemeye devam et" ise daha yeni damgayla geldiği için kabul edilir.
+    if (prev) {
+      const older = (job.updatedAt ?? 0) < (prev.updatedAt ?? 0);
+      const sameTime = (job.updatedAt ?? 0) === (prev.updatedAt ?? 0);
+      const reopens = !RUNNING_STATES.includes(prev.state) && RUNNING_STATES.includes(job.state);
+      if (older || (sameTime && reopens)) return;
+    }
     const finished = RUNNING_STATES.includes(prev?.state ?? 'submitting') && !RUNNING_STATES.includes(job.state);
     set({
       jobs: { ...get().jobs, [job.id]: job },
       creditsVersion: finished ? get().creditsVersion + 1 : get().creditsVersion,
     });
     if (finished && job.state === 'success') clearBlockedDownstream(job.nodeId);
+    if (finished && job.errorCode && HALT_MESSAGES[job.errorCode]) {
+      set({ halt: { code: job.errorCode, message: HALT_MESSAGES[job.errorCode] } });
+    }
   },
 
   jobsFor: (nodeId) =>
@@ -453,24 +506,13 @@ export const useCanvas = create<CanvasState>((set, get) => ({
       return 'failed';
     }
     const { inputs } = get().gatherInputs(nodeId);
-    if (!force) {
+    if (!force && get().isFresh(nodeId)) {
       const built = buildRequest(def, d.params, inputs);
       const cached = findCachedJob(get().jobsFor(nodeId), built.kieModel, built.input);
-      // Kopyalanmış node'un taşıdığı çıktı da aynı girdiden geldiyse güncel sayılır.
-      const pinnedFresh =
-        !cached &&
-        !!d.pinned?.ref &&
-        !!findCachedJob(
-          [{ id: 'pinned', state: 'success', files: ['x'], kieModel: d.pinned.kieModel, input: d.pinned.input } as Job],
-          built.kieModel,
-          built.input,
-        );
-      if (cached || pinnedFresh) {
-        if (cached && d.selectedJobId && d.selectedJobId !== cached.id) get().updateData(nodeId, { selectedJobId: cached.id });
-        get().setRunStatus(nodeId, { state: 'cached' });
-        clearBlockedDownstream(nodeId);
-        return 'ok';
-      }
+      if (cached && d.selectedJobId && d.selectedJobId !== cached.id) get().updateData(nodeId, { selectedJobId: cached.id });
+      get().setRunStatus(nodeId, { state: 'cached' });
+      clearBlockedDownstream(nodeId);
+      return 'ok';
     }
     get().updateData(nodeId, { runError: undefined });
     get().setRunStatus(nodeId, null);
@@ -532,6 +574,12 @@ export const useCanvas = create<CanvasState>((set, get) => ({
             get().setRunStatus(id, null);
             return (await waitForJob(running.id)) === 'success' ? 'ok' : 'failed';
           }
+          // Key geçersiz / kredi bitti: kalan adımlar hiç gönderilmez.
+          const halt = get().halt;
+          if (halt && !(get().isFresh(id) && !forced.has(id))) {
+            get().setRunStatus(id, { state: 'blocked', message: `Durduruldu: ${halt.message}` });
+            return 'blocked';
+          }
           const r = await get().startNode(id, forced.has(id));
           if (r === 'failed') get().setRunStatus(id, null);
           return r;
@@ -551,7 +599,7 @@ export const useCanvas = create<CanvasState>((set, get) => ({
     else if (all.some((r) => r !== 'ok')) get().showToast('Zincir hatayla tamamlandı');
   },
 
-  runNode: (nodeId) => get().runPipeline([nodeId], true),
+  runNode: (nodeId) => get().requestRun([nodeId], true),
 
   runAll: () => {
     const ids = get()
@@ -561,7 +609,124 @@ export const useCanvas = create<CanvasState>((set, get) => ({
       get().showToast('Çalıştırılacak model node\'u yok');
       return Promise.resolve();
     }
-    return get().runPipeline(ids, false);
+    return get().requestRun(ids, false);
+  },
+
+  /** Girdisi ve modeli aynı olan başarılı bir çıktı (kendi görevi ya da kopyadan gelen) var mı? */
+  isFresh: (nodeId) => {
+    const node = get().nodes.find((n) => n.id === nodeId);
+    if (!node || node.type !== 'model') return false;
+    const d = node.data as unknown as ModelData;
+    const def = getModel(d.modelId);
+    if (!def) return false;
+    const { inputs, missing } = get().gatherInputs(nodeId);
+    if (missing.length) return false;
+    let built;
+    try {
+      built = buildRequest(def, d.params, inputs);
+    } catch {
+      return false;
+    }
+    if (findCachedJob(get().jobsFor(nodeId), built.kieModel, built.input)) return true;
+    const p = d.pinned;
+    return (
+      !!p?.ref &&
+      !!findCachedJob(
+        [{ id: 'pinned', state: 'success', files: ['x'], kieModel: p.kieModel, input: p.input } as Job],
+        built.kieModel,
+        built.input,
+      )
+    );
+  },
+
+  estimate: (targets, forceTargets) => {
+    const { nodes, edges } = get();
+    let order: string[];
+    try {
+      order = planRun(targets, nodes, edges);
+    } catch {
+      return null;
+    }
+    return estimatePlan(
+      order,
+      (id) => directModelDeps(id, nodes, edges),
+      // Çalışmakta olan görevi olan node yeniden gönderilmez (zincir onu bekler), maliyete eklenmez.
+      (id) => get().isFresh(id) || get().jobsFor(id).some((j) => RUNNING_STATES.includes(j.state)),
+      (id) => {
+        const d = nodes.find((n) => n.id === id)?.data as unknown as ModelData | undefined;
+        const def = d && getModel(d.modelId);
+        if (!def || !d) return null;
+        return def.cost(withDefaults(def, d.params), get().gatherInputs(id).inputs)?.credits ?? null;
+      },
+      new Set(forceTargets ? targets : []),
+    );
+  },
+
+  requestRun: async (targets, forceTargets) => {
+    const est = get().estimate(targets, forceTargets);
+    if (!est) {
+      get().showToast('Grafta döngü var');
+      return;
+    }
+    if (!est.items.length) {
+      // Her şey önbellekte: yine de durumları göstermek için zincir üzerinden geçilir (istek gitmez).
+      await get().runPipeline(targets, forceTargets);
+      return;
+    }
+    // Yeni bir çalıştırma, önceki durdurmayı kaldırır (kullanıcı bakiye yüklemiş olabilir).
+    if (get().halt) set({ halt: null });
+    await get().refreshCredits();
+    const reasons = confirmReasons(est, get().settings.costConfirmThreshold, get().credits);
+    if (reasons.length) {
+      const ok = await new Promise<boolean>((resolve) => set({ confirm: { estimate: est, reasons, resolve } }));
+      set({ confirm: null });
+      if (!ok) return;
+    }
+    const startedAt = Date.now();
+    await get().runPipeline(targets, forceTargets);
+    const spent = Object.values(get().jobs)
+      .filter((j) => j.createdAt >= startedAt - 1000 && j.credits != null)
+      .reduce((s, j) => s + (j.credits ?? 0), 0);
+    if (spent > 0) get().showToast(`Zincir bitti · ${spent.toLocaleString('tr-TR')} kredi harcandı`);
+  },
+
+  resolveConfirm: (ok) => get().confirm?.resolve(ok),
+
+  clearHalt: () => set({ halt: null }),
+
+  refreshCredits: async () => {
+    try {
+      const { credits } = await api<{ credits: number }>('/credits');
+      set({ credits, creditsError: null });
+    } catch (err) {
+      set({ creditsError: (err as Error).message });
+      if (err instanceof ApiError && err.status === 401) {
+        set({ halt: { code: '401', message: HALT_MESSAGES['401'] } });
+      }
+    }
+  },
+
+  loadSettings: async () => {
+    try {
+      set({ settings: await api<{ costConfirmThreshold: number }>('/settings') });
+    } catch {
+      /* varsayılanlar kalır */
+    }
+  },
+
+  saveSettings: async (patch) => {
+    try {
+      set({
+        settings: await api<{ costConfirmThreshold: number }>('/settings', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(patch),
+        }),
+      });
+      get().showToast('Ayar kaydedildi');
+    } catch (err) {
+      get().showToast(`Ayar kaydedilemedi: ${(err as Error).message}`);
+    }
   },
 
   // --- Proje ------------------------------------------------------------------

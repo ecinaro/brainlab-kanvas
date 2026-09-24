@@ -9,6 +9,7 @@ import { rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { JobManager } from '../jobs/manager.js';
 import { projectRoutes } from './projects.js';
+import { settingsRoutes } from './settings.js';
 
 const IMAGE_TYPES: Record<string, string> = {
   'image/png': '.png',
@@ -80,4 +81,5 @@ export async function canvasRoutes(
   });
 
   await app.register(projectRoutes, { projectsDir, jobs });
+  await app.register(settingsRoutes, { dataDir });
 }

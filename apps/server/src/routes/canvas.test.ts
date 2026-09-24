@@ -97,6 +97,18 @@ describe('/api/uploads', () => {
   });
 });
 
+describe('/api/settings', () => {
+  it('varsayılanı döner, geçerli değeri kaydeder, geçersizi reddeder', async () => {
+    const { app } = setup();
+    expect((await app.inject({ url: '/api/settings', headers })).json()).toEqual({ costConfirmThreshold: 20 });
+    const ok = await app.inject({ method: 'PUT', url: '/api/settings', headers, payload: { costConfirmThreshold: 50 } });
+    expect(ok.json()).toEqual({ costConfirmThreshold: 50 });
+    const bad = await app.inject({ method: 'PUT', url: '/api/settings', headers, payload: { costConfirmThreshold: -1 } });
+    expect(bad.statusCode).toBe(400);
+    expect((await app.inject({ url: '/api/settings', headers })).json()).toEqual({ costConfirmThreshold: 50 });
+  });
+});
+
 describe('/api/projects', () => {
   it('kaydeder ve geri yükler', async () => {
     const { app } = setup();

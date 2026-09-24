@@ -1,33 +1,22 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
 import { goProjects, type Route } from '../lib/route';
 import { useCanvas } from '../store';
 
-type CreditState =
-  | { status: 'loading' }
-  | { status: 'ok'; credits: number }
-  | { status: 'error'; message: string };
-
 const SAVE_LABEL = { idle: '', saving: 'Kaydediliyor…', saved: 'Kaydedildi', error: 'Kaydedilemedi' } as const;
 
 export function TopBar({ route }: { route: Route }) {
-  const [credit, setCredit] = useState<CreditState>({ status: 'loading' });
+  const credits = useCanvas((s) => s.credits);
+  const creditsError = useCanvas((s) => s.creditsError);
   const creditsVersion = useCanvas((s) => s.creditsVersion);
+  const refresh = useCanvas((s) => s.refreshCredits);
   const [mock, setMock] = useState(false);
 
   useEffect(() => {
     api<{ mock?: boolean }>('/health')
       .then((h) => setMock(!!h.mock))
       .catch(() => {});
-  }, []);
-
-  const refresh = useCallback(async () => {
-    try {
-      const { credits } = await api<{ credits: number }>('/credits');
-      setCredit({ status: 'ok', credits });
-    } catch (err) {
-      setCredit({ status: 'error', message: (err as Error).message });
-    }
+    useCanvas.getState().loadSettings();
   }, []);
 
   // İlk açılışta ve her görev bittiğinde bakiye yenilenir.
@@ -62,18 +51,19 @@ export function TopBar({ route }: { route: Route }) {
           className="flex min-w-0 items-center gap-2 rounded-lg border border-line bg-raised px-3 py-1.5 text-xs hover:border-muted"
         >
           <span className="text-muted">Kredi</span>
-          {credit.status === 'loading' && <span className="text-muted">…</span>}
-          {credit.status === 'ok' && (
-            <span data-testid="credits" className="font-semibold tabular-nums">
-              {credit.credits.toLocaleString('tr-TR')}
+          {creditsError ? (
+            <span className="max-w-64 truncate text-danger" title={creditsError}>
+              {creditsError}
             </span>
-          )}
-          {credit.status === 'error' && (
-            <span className="max-w-64 truncate text-danger" title={credit.message}>
-              {credit.message}
+          ) : credits === null ? (
+            <span className="text-muted">…</span>
+          ) : (
+            <span data-testid="credits" className="font-semibold tabular-nums">
+              {credits.toLocaleString('tr-TR')}
             </span>
           )}
         </button>
+        <SettingsMenu />
       </div>
     </header>
   );
@@ -113,11 +103,80 @@ function ProjectTitle() {
   );
 }
 
+function SettingsMenu() {
+  const [open, setOpen] = useState(false);
+  const threshold = useCanvas((s) => s.settings.costConfirmThreshold);
+  const save = useCanvas((s) => s.saveSettings);
+  const [draft, setDraft] = useState(String(threshold));
+  useEffect(() => setDraft(String(threshold)), [threshold, open]);
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        title="Ayarlar"
+        className="rounded-lg border border-line bg-raised px-2 py-1.5 text-xs text-muted hover:border-muted hover:text-fg"
+      >
+        ⚙
+      </button>
+      {open && (
+        <div className="absolute right-0 top-10 z-40 w-72 rounded-xl border border-line bg-surface p-4 shadow-2xl">
+          <label className="block text-xs">
+            <span className="font-medium">Onay eşiği (kredi)</span>
+            <span className="mt-0.5 block text-[11px] text-muted">
+              Bir çalıştırmanın tahmini toplamı bu değeri aşarsa önce onay istenir. Fiyatı bilinmeyen modeller ve
+              yetersiz bakiye her zaman onay ister. 0 = her üretimde sor.
+            </span>
+            <input
+              type="number"
+              min={0}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              className="mt-2 w-full rounded-md border border-line bg-bg px-2 py-1 text-xs outline-none focus:border-muted"
+            />
+          </label>
+          <div className="mt-3 flex justify-end gap-2">
+            <button onClick={() => setOpen(false)} className="rounded-md px-2 py-1 text-xs text-muted hover:text-fg">
+              Kapat
+            </button>
+            <button
+              onClick={async () => {
+                await save({ costConfirmThreshold: Number(draft) });
+                setOpen(false);
+              }}
+              className="rounded-md bg-accent px-3 py-1 text-xs font-semibold text-white hover:brightness-110"
+            >
+              Kaydet
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** "Tümünü çalıştır" basılırsa üretilecek node'ların tahmini toplamı (önbellekten gelecekler hariç). */
+function useRunAllEstimate() {
+  const nodes = useCanvas((s) => s.nodes);
+  const edges = useCanvas((s) => s.edges);
+  const jobs = useCanvas((s) => s.jobs);
+  return useMemo(() => {
+    const ids = nodes.filter((n) => n.type === 'model').map((n) => n.id);
+    return ids.length ? useCanvas.getState().estimate(ids, false) : null;
+  }, [nodes, edges, jobs]);
+}
+
 function CanvasActions() {
   useCanvas((s) => s.historyVersion); // geri al/yinele durumları değişince yeniden çiz
   const { undo, redo, canUndo, canRedo, exportProject } = useCanvas.getState();
   const busy = useCanvas((s) => Object.values(s.runStatus).some((r) => r.state === 'pending'));
   const runAll = useCanvas((s) => s.runAll);
+  const est = useRunAllEstimate();
+  const estLabel = !est
+    ? ''
+    : est.items.length === 0
+      ? 'güncel'
+      : `~${est.total.toLocaleString('tr-TR', { maximumFractionDigits: 1 })} kr${est.unknown ? ' + ?' : ''}`;
 
   const iconBtn =
     'rounded-lg border border-line bg-raised px-2 py-1.5 text-xs text-muted hover:border-muted hover:text-fg disabled:opacity-30 disabled:hover:border-line disabled:hover:text-muted';
@@ -151,6 +210,7 @@ function CanvasActions() {
         className="rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-white transition hover:brightness-110 disabled:opacity-50"
       >
         {busy ? 'Zincir çalışıyor…' : 'Tümünü çalıştır'}
+        {!busy && estLabel && <span className="ml-1.5 font-normal opacity-80" data-testid="run-estimate">· {estLabel}</span>}
       </button>
     </>
   );

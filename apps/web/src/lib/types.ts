@@ -74,6 +74,8 @@ export interface Job {
   errorMsg: string | null;
   createdAt: number;
   finishedAt: number | null;
+  /** Sunucudaki son değişiklik zamanı; sıra dışı gelen eski güncellemeleri ayıklamak için */
+  updatedAt?: number;
 }
 
 export const RUNNING_STATES: JobState[] = ['submitting', 'waiting', 'queuing', 'generating', 'downloading'];

@@ -1,7 +1,9 @@
 import { ReactFlowProvider } from '@xyflow/react';
 import { useEffect } from 'react';
 import { Canvas } from './components/Canvas';
+import { ConfirmRun, HaltBanner } from './components/ConfirmRun';
 import { Inspector } from './components/Inspector';
+import { JobTray } from './components/JobTray';
 import { LeftRail } from './components/LeftRail';
 import { ProjectsScreen } from './components/ProjectsScreen';
 import { TopBar } from './components/TopBar';
@@ -18,8 +20,10 @@ export function App() {
   return (
     <div className="flex h-full flex-col">
       <TopBar route={route} />
+      <HaltBanner />
       <main className="relative min-h-0 flex-1">
         {route.view === 'projects' ? <ProjectsScreen /> : <CanvasScreen projectId={route.projectId} />}
+        <ConfirmRun />
         {toast && (
           <div className="pointer-events-none absolute bottom-6 left-1/2 z-20 -translate-x-1/2 rounded-lg border border-line bg-raised px-3 py-2 text-xs shadow-xl">
             {toast}
@@ -70,6 +74,7 @@ function CanvasScreen({ projectId }: { projectId: string }) {
       <Canvas />
       <LeftRail />
       <Inspector />
+      <JobTray />
     </ReactFlowProvider>
   );
 }

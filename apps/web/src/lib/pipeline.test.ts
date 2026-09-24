@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { checkConnection } from './connections';
-import { directModelDeps, findCachedJob, planRun, stableStringify } from './pipeline';
+import { confirmReasons, directModelDeps, estimatePlan, findCachedJob, planRun, stableStringify } from './pipeline';
 import type { AppEdge, AppNode, Job } from './types';
 
 const model = (id: string, modelId = 'nano-banana-2'): AppNode => ({
@@ -57,6 +57,40 @@ describe('planRun', () => {
       ok: false,
       reason: 'Bu bağlantı döngü oluşturur',
     });
+  });
+});
+
+describe('maliyet tahmini', () => {
+  // A → V, A → U ; B bağımsız
+  const order = ['A', 'B', 'V', 'U'];
+  const deps: Record<string, string[]> = { A: [], B: [], V: ['A'], U: ['A'] };
+  const cost: Record<string, number | null> = { A: 8, B: 6, V: 42, U: 10 };
+  const est = (fresh: string[], forced: string[] = []) =>
+    estimatePlan(order, (id) => deps[id], (id) => fresh.includes(id), (id) => cost[id], new Set(forced));
+
+  it('her şey güncelse hiçbir node çalışmaz', () => {
+    expect(est(['A', 'B', 'V', 'U'])).toEqual({ items: [], total: 0, unknown: 0 });
+  });
+
+  it('upstream değişince ondan beslenenler de sayılır, bağımsız dal sayılmaz', () => {
+    const r = est(['B', 'V', 'U']);
+    expect(r.items.map((i) => `${i.nodeId}:${i.reason}`)).toEqual(['A:changed', 'V:upstream', 'U:upstream']);
+    expect(r.total).toBe(60);
+  });
+
+  it('zorlanan hedef güncel olsa da sayılır; fiyatı bilinmeyenler ayrıca belirtilir', () => {
+    cost.V = null;
+    const r = est(['A', 'B', 'V', 'U'], ['V']);
+    expect(r).toEqual({ items: [{ nodeId: 'V', credits: null, reason: 'forced' }], total: 0, unknown: 1 });
+    cost.V = 42;
+  });
+
+  it('onay nedenleri: eşik, bilinmeyen fiyat, yetersiz bakiye', () => {
+    const r = est(['B', 'V', 'U']); // 60
+    expect(confirmReasons(r, 100, 500)).toEqual([]);
+    expect(confirmReasons(r, 50, 500)).toHaveLength(1);
+    expect(confirmReasons(r, 100, 16)).toEqual([expect.stringContaining('Bakiye')]);
+    expect(confirmReasons({ items: [], total: 0, unknown: 2 }, 100, null)).toEqual([expect.stringContaining('bilinmiyor')]);
   });
 });
 

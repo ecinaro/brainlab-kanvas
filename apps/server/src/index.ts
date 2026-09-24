@@ -11,7 +11,8 @@ function createKie(): KieClient {
   if (!config.mock) {
     return new KieClient({ apiKey: config.kieApiKey, baseUrl: config.kieBaseUrl, uploadBaseUrl: config.kieUploadBaseUrl });
   }
-  // Sahte mod: gerçek Kie'ye hiçbir istek gitmez. Prompt'ta "[fail]" geçen görevler başarısız olur.
+  // Sahte mod: gerçek Kie'ye hiçbir istek gitmez. Prompt'ta "[fail]" geçen görevler başarısız olur,
+  // "[402]" geçenler "kredi yetersiz" hatası alır.
   const samplePath = join(ROOT_DIR, 'scripts', 'mock-sample.png');
   const fake = new FakeKie({
     // Yaklaşık 12-15 saniye süren bir üretim (sayfa yenileme gibi durumları deneyebilmek için).
@@ -24,6 +25,7 @@ function createKie(): KieClient {
       { state: 'success', credits: 0 },
     ],
     failWhen: (input) => JSON.stringify(input).includes('[fail]'),
+    createErrorWhen: (input) => (JSON.stringify(input).includes('[402]') ? 402 : undefined),
     sampleImage: existsSync(samplePath) ? readFileSync(samplePath) : undefined,
   });
   return new KieClient({ apiKey: 'mock', baseUrl: 'https://kie.test', uploadBaseUrl: 'https://upload.kie.test', fetchImpl: fake.fetch });
